@@ -1,0 +1,949 @@
+---
+title: "SCEM Final Coursework"
+author: "SNEHA SAPHALA RAM PRASAD (2712927)"
+subtitle: Task II
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+pdf_engine: xelatex
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+*****
+
+## IMPORTANT NOTES: 
+- **DO NOT** change the code block names. Enter your solutions to each question into the predefined code blocks. 
+- **Don't forget to replace the placeholder value in code block "Setup" by your valid student ID number.**
+- If you want to use any packages, add their names to the vector `required.packages` in the code block "Setup". That code block will 
+automatically install those packages (if needed) and load them. Any other calls to `install.packages()`, `library()` or `require()` may result in zero marks for the activity where it happens.
+- Make sure that the data files *df.rds* and *df_holdout.rds* are located in the same folder as this file, _Task02.Rmd_.
+- Instructions for this task are provided in blue text below. Your solution should NOT be added within those text boxes, and should NOT be in blue text. **During marking, all the text within the text blocks below, with names starting with "prompt", will be removed and not visible to the marker.**
+
+```{r ID, echo=FALSE, message=FALSE, warning=FALSE}
+## We will use your student ID as the seed for the random number generator.
+MY_STUDENT_ID <- 2712927 # <-- Replace "ABCDEFG" by your student ID number (as an integer, i.e., without quotes).
+```
+
+```{r Setup, echo=FALSE, message=FALSE, warning=FALSE}
+force_reinstall_everything <- FALSE ## <--- change to TRUE to force a reinstall of 
+                                    ## all packages listed in allowed.packages
+
+## ADD ANY REQUIRED PACKAGES TO THE VECTOR BELOW
+## Note: tidyverse includes:  ggplot2, dplyr, tidyr, readr, purrr, tibble, 
+##                            stringr, forcats, and lubridate.
+allowed.packages <- c("tidyverse", 
+                      "tidymodels", 
+                      "recipes", 
+                      "parsnip", 
+                      "bonsai", 
+                      "healthyR.ai", 
+                      "knitr",
+                      "DataExplorer",
+                      "visdat",
+                      "SmartEDA",
+                      "themis",
+                      "doParallel")
+
+
+## DO NOT CHANGE ANYTHING ELSE IN THIS CODE BLOCK
+for (i in seq_along(allowed.packages)){
+  if(!(allowed.packages[i] %in% installed.packages()[, 1]) || force_reinstall_everything){
+    install.packages(allowed.packages[i], 
+                     dependencies = c("Depends", "Imports"),
+                     repos = "https://cloud.r-project.org")
+  }
+  library(allowed.packages[i], character.only = TRUE)
+}
+
+knitr::opts_chunk$set(echo = TRUE, collapse=TRUE)
+ignore <- runif(1) # To initialise the PRNG
+
+cat("\nList of allowed packages (pre-loaded):\n ", paste(allowed.packages, collapse="\n  "))
+```
+
+```{r checkID, echo=FALSE}
+if(!is.numeric(MY_STUDENT_ID)){
+  stop("MY_STUDENT_ID MUST BE YOUR VALID NUMERIC ID.")
+} 
+```
+
+*****
+
+:::{#prompt .message style="color: blue;"}
+In this task you will build a full predictive pipeline for the problem described in the coursework specs. Please read each activity carefully and follow the instructions to complete your coursework.
+
+Make sure that the data file **df.rds** is placed in the same folder as this Task02.Rmd file. The data that you can use for model development in this task will then be automatically loaded and set up for you, and stored into a dataframe variable called `df`.
+:::
+
+
+```{r load_data, echo = FALSE}
+## DO NOT CHANGE ANYTHING IN THIS CODE BLOCK
+set.seed(MY_STUDENT_ID)
+df <- readRDS("df.rds") %>% sample_frac(0.6, replace = FALSE)
+
+```
+
+*****
+
+## 1. Exploratory Data Analysis
+:::{#prompt .message style="color: blue;"}
+**Note**: It is expected that this section should result in no more than 600-ish words (possibly less; not counting the code blocks).
+
+Add here your exploratory data analysis. Your solution should include both your code (which markers must be able to run independently) and your rationale for each exploratory step. In general, your EDA steps should include:
+
+- A short justification of what a given plot or statistical summary is intended to reveal about the data.
+
+- A code block implementing your EDA step.
+
+At the end of your EDA section, you should also include a short commentary on what your data exploration revealed about the data, and which pre-processing steps may be required based on that.
+
+You can use as many code blocks as needed, but don't overdo it (remember - everything needs to have a proper rationale). 
+:::
+
+### 1.1 Remove Non‑Informative Columns
+
+Removing non- informative columns from the dataset that do not contribute to the prediction before actual EDA. Converting the target column(Class) into a factor with meaningful labels.
+
+
+```{r}
+df<- df%>%
+  select(Info_PepID, Info_pos, Info_group,starts_with("feat"), Class)%>%
+  mutate(Class = factor(Class,levels=c(-1,1),
+                        labels=c("NoResponse","Response")))
+
+```
+
+The dataset was split into development(80%) and holdout(20%) for training and testing purposes, ensuring that all rows with the same Info_group remain together. This prevents data leakage and then the holdout set is removed.
+```{r}
+split <- group_initial_split(df,group=Info_group,prop = 0.8)
+df.dev     <- training(split)
+df.holdout <- testing(split)
+
+saveRDS(df.holdout, "Epitope_holdout.rds")
+rm(df.holdout, df)
+```
+### 1.2 Dataset dimensions and structure
+Understanding the number of rows, columns, and variable types of the development dataset.
+```{r}
+dim(df.dev)
+head(df.dev,40)
+
+```
+
+Using ExpData() from SmartEDA package to get summary of the development dataset.
+
+```{r}
+ExpData(data=df.dev, type=1)
+
+```
+### 1.3 Class Distribution
+ExpCTable generates the frequency table for categorical variables. This helps detect the class imbalance of the target variable.
+
+```{r}
+cat_sum <- ExpCTable(df.dev)
+cat_sum
+
+```
+
+The bar plot of Class shows the distribution of response vs non-response. This reveals to what extend the imbalance exists , which is important for deciding on class weights and resampling strategies later on. Also checking the missing values in the categorical variable.
+```{r}
+ggplot(df.dev, aes(x = Class, fill = Class)) +
+  geom_bar() +
+  xlab("Class") +
+  ylab("Count") +
+  ggtitle("Epitope Response Distribution") +
+  theme_minimal()
+
+sum(is.na(df.dev$Class))
+
+```
+### 1.4 Missing Values
+ExpNumStat from SmartEDA library is used to get the numeric summary for each feature. The output is the basic statistics like mean, spread, shape , outlier counts and number of missing values per feature.
+```{r}
+features_only <- df.dev %>% select(starts_with("feat"))
+
+num_sum <- ExpNumStat(features_only, Outlier = TRUE, MesofShape = 2)
+
+```
+
+Grouping features by substring (eg : CTDC, CTDD, BLOSUM, SOCN, QSO,etc) to understand which group behave similarly and whether certain groups have more missing values.
+```{r}
+num_sum <- num_sum %>%
+  mutate(Group = case_when(
+    str_detect(Vname, "CTDC") ~ "CTDC",
+    str_detect(Vname, "CTDD") ~ "CTDD",
+    str_detect(Vname, "CTDT") ~ "CTDT",
+    str_detect(Vname, "BLOSUM") ~ "BLOSUM",
+    str_detect(Vname, "SOCN") ~ "SOCN",
+    str_detect(Vname, "QSO") ~ "QSO",
+    str_detect(Vname, "ScalesGap") ~ "ScalesGap",
+    str_detect(Vname, "AAC") ~ "AAC",
+    str_detect(Vname, "Atoms") ~ "Atoms",
+    str_detect(Vname, "AAtypes") ~ "AAtypes",
+    str_detect(Vname, "MolWeight") ~ "MolWeight",
+    str_detect(Vname, "Entropy") ~ "Entropy",
+    TRUE ~ "Other"
+  ))
+head(num_sum,20)
+
+```
+
+This plot focus specifically on missingness, it visualizes the top 30 missing percentage first followed by the next thirty. It is color coded based on the feature groups. Since we are working with a large dataset facet wrapping for all the feature groups is not possible so the visualization is done for the top features but grouped based on their features.
+```{r}
+missing_summary <- num_sum %>%
+  filter(Per_of_Missing > 0) %>%
+  arrange(desc(Per_of_Missing))
+head(missing_summary,40)
+
+top_missing_global <- missing_summary %>%
+  slice_max(Per_of_Missing, n = 30) %>%                     
+  arrange(desc(Per_of_Missing)) %>%                        
+  mutate(Vname = factor(Vname, levels = Vname))  
+
+
+ggplot(top_missing_global, aes(x = Vname, y = Per_of_Missing, fill = Group)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 30 Features by Missing Percentage",
+    x = "Feature",
+    y = "Missing Percentage"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10))
+
+
+next_missing_global <- missing_summary %>%
+  slice(31:60) %>% 
+  mutate(Vname = factor(Vname, levels = Vname))
+
+ggplot(next_missing_global, aes(x = Vname, y = Per_of_Missing, fill = Group)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Features Ranked 31–60 by Missing Percentage",
+    x = "Feature",
+    y = "Missing Percentage"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10))
+
+```
+The plot below shows the pattern of missingness of first thirty features followed by the next thirty, whether it is concentrated in small subset or tends to be missing together which will further affect the imputation choices using visdat package
+```{r}
+top_features <- top_missing_global$Vname
+df_top_missing <- df.dev %>%
+  select(all_of(top_features))
+
+vis_miss(df_top_missing) +
+  ggtitle("Missingness Pattern of Top Features") +
+  theme(axis.text.x.top = element_text(angle = 90, size = 5))
+
+next_missing_global <- missing_summary %>%
+  slice(31:60) %>%
+  mutate(Vname = factor(Vname, levels = Vname))
+
+next_features <- next_missing_global$Vname
+
+
+df_next_missing <- df.dev %>%
+  select(all_of(next_features))
+
+vis_miss(df_next_missing) +
+  ggtitle("Missingness Pattern of Features Ranked 31–60") +
+  theme(axis.text.x.top = element_text(angle = 90, size = 5))
+
+```
+### 1.5 Outliers
+The plot below identifies features where large observations that have extreme values and visualize their distributions. This helps decide whether to trim ,transform or scale these extreme values and whether some of the variables are dominated by unusually large or small numbers.
+```{r}
+outlier_summary <- num_sum %>%
+  mutate(outlier_prop = nOutliers / (TN - NA_Value)) %>%
+  filter(outlier_prop > 0) %>%
+  arrange(desc(outlier_prop)) %>%
+  slice_max(outlier_prop, n = 40) %>%
+  mutate(Vname = factor(Vname, levels = Vname))
+outlier_summary
+
+ggplot(outlier_summary, aes(x = Vname, y = outlier_prop, fill = Group)) +
+  geom_col() +
+  coord_flip()+
+  labs(
+    title = "Features Ranked 41–80 by Outlier Proportion",
+    x = "Feature",
+    y = "Proportion of Outliers"
+  ) +
+  theme_minimal() +
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_text(size = 9))
+
+
+next_outlier_summary <- num_sum %>%
+  mutate(outlier_prop = nOutliers / (TN - NA_Value)) %>%
+  filter(outlier_prop > 0) %>%
+  arrange(desc(outlier_prop)) %>%
+  slice(41:80) %>%
+  mutate(Vname = factor(Vname, levels = Vname))
+
+ggplot(next_outlier_summary, aes(x = Vname, y = outlier_prop, fill = Group)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Features Ranked 41–80 by Outlier Proportion",
+    x = "Feature",
+    y = "Proportion of Outliers"
+  ) +
+  theme_minimal() +
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_text(size = 9))
+
+
+
+```
+The box plot shows the distribution for features with most outliers. The yellow dots highlights extreme values and teh flipped layout makes it easier to compare with other features. These features may need trimming or transformation to avoid skewing.
+
+```{r}
+top_outlier_vars <- outlier_summary %>% 
+  slice_max(outlier_prop, n = 10) %>% 
+  pull(Vname)
+
+df_outliers <- df.dev %>%
+  select(any_of(top_outlier_vars)) %>%
+  pivot_longer(everything(), names_to = "Feature", values_to = "Value")
+
+ggplot(df_outliers, aes(x = Feature, y = Value)) +
+  geom_boxplot(outlier.colour = "gold", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Boxplots of Outlier-Heavy Features (Ranked 1-10)", 
+       x = "Feature", 
+       y = "Value") +
+  theme_minimal()
+  
+
+next_outlier_vars <- outlier_summary %>%
+  slice(11:20) %>%
+  pull(Vname)
+
+
+df_next_outliers <- df.dev %>%
+  select(any_of(next_outlier_vars)) %>%
+  pivot_longer(everything(), names_to = "Feature", values_to = "Value")
+
+
+ggplot(df_next_outliers, aes(x = Feature, y = Value)) +
+  geom_boxplot(outlier.colour = "gold", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Boxplots of Outlier-Heavy Features (Ranked 11–20)",
+       x = "Feature",
+       y = "Value") +
+  theme_minimal()
+
+
+
+```
+The range plot highlights features with large value spreads which needs to be trimmed or scaled to avoid problems during model training. A log scale is used to make the difference easier to see.
+```{r}
+  range_plot_data <- num_sum %>%
+    select(Vname, min, max, Group)%>%
+    mutate(Range = max - min)%>%
+    arrange(desc(Range)) %>%
+    slice_head(n = 30) %>%
+    mutate(Vname = factor(Vname, levels = Vname))
+range_plot_data
+
+range_plot_data_nonzero <- range_plot_data %>%
+  filter(!is.na(min), !is.na(max), is.finite(min), is.finite(max), min > 0, max > 0)
+
+ggplot(range_plot_data_nonzero, aes(y = Vname)) +
+  geom_segment(aes(x = min, xend = max, yend = Vname), color = "grey70") +
+  geom_point(aes(x = min), color = "blue") +
+  geom_point(aes(x = max), color = "red") +
+  scale_x_log10() +
+  labs(
+    title = "Feature Ranges (Log Scale, Non-Zero)",
+    x = "Value",
+    y = "Feature"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.y = element_text(size = 6))
+
+```
+### 1.6 Distribution Shape
+
+Finally, focusing on the features with highest standard deviation and kurtosis , and plotting their density (on log scale for clarity and colored by group), reveals heavy-tailed and highly peaked distributions. This shows that many variables don’t follow a normal bell‑shaped curve. Instead, they have mostly small values with occasional very large spikes.
+```{r}
+
+top_sd_features <- num_sum %>% 
+  arrange(desc(SD)) %>% 
+  slice_head(n = 15) %>% 
+  pull(Vname)
+
+df_sd <- df.dev %>%
+  select(all_of(top_sd_features)) %>%
+  pivot_longer(everything(), names_to = "Feature", values_to = "Value") %>%
+  left_join(select(num_sum, Vname, Group), by = c("Feature" = "Vname"))
+
+df_sd_nonzero <- df_sd %>%
+  filter(!is.na(Value), Value != 0, is.finite(Value))
+
+ggplot(df_sd_nonzero, aes(x = Value, color = Group, fill = Group)) +
+  geom_density(alpha = 0.4, bw = 0.1) +
+  facet_wrap(~ Feature, scales = "free_x") +
+  scale_x_log10() +
+  labs(
+    title = "Density of Top Features (Non-Zero Values, Log Scale)",
+    x = "Value",
+    y = "Density",
+    color = "Group",
+    fill = "Group"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+
+
+```
+```{r}
+top_kur_features <- num_sum %>% 
+  arrange(desc(Kurtosis)) %>% 
+  slice_head(n = 15) %>% 
+  pull(Vname)
+
+df_kur <- df.dev %>%
+  select(all_of(top_kur_features)) %>%
+  pivot_longer(everything(), names_to = "Feature", values_to = "Value") %>%
+  left_join(select(num_sum, Vname, Group), by = c("Feature" = "Vname"))
+
+df_kur_nonzero <- df_kur %>%
+  filter(!is.na(Value), Value != 0, is.finite(Value))
+
+ggplot(df_kur_nonzero, aes(x = Value, color = Group, fill = Group)) +
+  geom_density(alpha = 0.4) +
+  facet_wrap(~ Feature, scales = "free_x") +
+  scale_x_log10() +
+  labs(
+    title = "Density Plot of Top Kurtosis Features (Non-Zero, Log Scale, Group-Colored)",
+    x = "Value",
+    y = "Density",
+    color = "Group",
+    fill = "Group"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+
+
+```
+Overall, the EDA shows the epitope development set is high-dimensional with 5862 rows and 389 columns. It has 387 numeric features grouped into CTDC, CTDD,CTDT,BLOSUM,SOCN,QSO,ScalesGap, AAC, Atoms,AAtypes,MolWeight and Entropy plus a single categorical variable called Class. The class distribution confirms a moderate imbalance with more NoResponse than Response samples and no missing labels. The class imbalance is corrected later using class weights or upsampling .
+
+TheSmartEDA summaries and missingness plot indicate that 40.36% of variables are complete and 59.64% of variables have missing cases upto 50% and none exceeds 50%, which means that the missing cases are common but not extreme and are spread across different features rather than few nearly empty ones.KNN-imputation is used on feature variables to keep the fields unchanged and retaining most features. KNN works well because it uses similarity between peptides and takes advantage of correlations between them and fits well with normalization and PCA.Mean or median imputation was not used because it ignores the relationship between features and between features and class, which reduces the variance and breaks correlations.
+
+Finally, outlier, range and density plots for features with highest standard deviation and kurtosis show that feature groups especially BLOSUM, SOCN/QSO, ScalesGap and Entropy descriptors have very extreme values.Range plot confirms that some features vary enormously compared to other and their values are spread out across huge scales.Density plots show heavy‑tailed distributions with sharp peaks and long sparse tails.This means that preprocessing is needed which includes winsorising the most extreme 1% of values, standardising all features to similar scale and applying PCA to reduce redundancy among correlated features and reducing the dimensions of the dataset making the model more stable for prediction.
+
+## 2. Data preprocessing and feature engineering
+
+:::{#prompt .message style="color: blue;"}
+**Note**: It is expected that this section should result in no more than 400-ish words (possibly less; not counting the code blocks). 
+
+Add here your data pre-processing and feature selection/engineering steps. Your solution should include both your code (which markers must be able to run independently) and your rationale. In general, your steps should include:
+
+- A short justification of which insight from your EDA is motivating a given data transformation.
+
+- A code block implementing your pre-processing step.
+
+**In addition** to the regular data transformations emerging from the insights you gathered during EDA, this section must contain the  splitting off of a test set that you'll use later for final performance assessment  (check the CW specs for details).
+
+At the end of this section you should also include a short commentary on what changes the pre-processing has induced in your data (i.e., what did the data "look like" before this step vs. what it "looks like" afterwards.
+
+You can use as many code blocks as needed, but don't overdo it (remember - everything needs to have a proper rationale). If you compare different pre-processing options, make sure to make it clear, and to indicate at the end which option you selected, and why. 
+
+**Note**: In this section you'll be basically defining which data transformations you will later incorporate into your predictive pipeline. When you build the pipeline in the next section, you'll encapsulate all those steps (together with the model) into a single object that you can fit and deploy as a single unit.
+:::
+
+Based on EDA, seperate test set is created so that all preprocessing and model selection are made using training set. A grouped initial split is used so that all peptides within same Info_group stay in the same partition to avoid data leakage.
+```{r}
+set.seed(2712927)
+split2 <- group_initial_split(df.dev, group = Info_group, prop = 0.80)
+train_data <- training(split2)
+test_data <- testing(split2)
+
+train_data <- train_data %>%
+  select(
+    Info_PepID, Info_pos, Info_group,   
+    starts_with("feat_"),               
+    Class                               
+  )
+
+```
+
+The EDA shows that many feature variables have 0 to 50% missing values, numerous outliers , wide ranges and heavy-tailed distributions and the outcome variable(Class) is slightly imbalanced. 
+To address this the preprocessing steps used here are KNN imputation on feature variables to handle moderately missing data across the feature groups. Winsorising the extreme 1% of values to reduce the effect of rare spikes. Standardising all feature variables to similar scales.Applying PCA to reduce dimensionality of the dataset and to reduce redundancy.Because there is a slight imbalance in the class variable and skewed towards NoResponse an additional recipe of upsampling of minority class is used.
+Three different recipes are created one with PCA,one with PCA and upscaling and one without PCA or upscaling . These recipes are later compared in modelling to detect the most effective approach.
+```{r}
+# 1.recipe with PCA
+recipe_pca <- recipe(Class ~ ., data = train_data) %>%
+  update_role(Info_PepID, Info_pos, Info_group, new_role = "id") %>%
+  step_zv(all_predictors()) %>%
+  step_impute_knn(starts_with("feat_"), neighbors = 5) %>%
+  step_mutate_at(
+    starts_with("feat_"),
+    fn = ~ scales::squish(., quantile(., c(0.01, 0.99), na.rm = TRUE))
+  ) %>%
+  step_normalize(starts_with("feat_")) %>%
+  step_pca(starts_with("feat_"), threshold = 0.9)
+
+#2. Imbalance handling (PCA + upsampling)
+recipe_pca_upsample <- recipe(Class ~ ., data = train_data) %>%
+  update_role(Info_PepID, Info_pos, Info_group, new_role = "id") %>%
+  step_zv(all_predictors()) %>%
+  step_impute_knn(starts_with("feat_"), neighbors = 5) %>%
+  step_mutate_at(
+    starts_with("feat_"),
+    fn = ~ scales::squish(., quantile(., c(0.01, 0.99), na.rm = TRUE))
+  ) %>%
+  step_normalize(starts_with("feat_")) %>%
+  step_pca(starts_with("feat_"), threshold = 0.9) %>%
+  step_upsample(Class)
+
+
+#3. Recipe without PCA or upsampling
+recipe_no_pca <- recipe(Class ~ ., data = train_data) %>%
+  update_role(Info_PepID, Info_pos, Info_group, new_role = "id") %>%
+  step_zv(all_predictors()) %>%
+  step_impute_knn(starts_with("feat_"), neighbors = 5) %>%
+  step_mutate_at(
+    starts_with("feat_"),
+    fn = ~ scales::squish(., quantile(., c(0.01, 0.99), na.rm = TRUE))
+  ) %>%
+  step_normalize(starts_with("feat_"))
+
+```
+
+Before preprocessing, the development data consisted of hundreds of features on different scales, with missing values spread across many variables and numerous extreme values. After applying the chosen recipe, missing values are imputed using similar peptides, extreme tails are trimmed at 1st and 99th percentiles , all numeric features are scaled and high dimensional feature block is compressed into smaller set of principle components that retains most of the variance.In the upsampled recipe the minority Response Class is balanced in training folds.These preprocessing transformations makes the dataset more suitable for clasification model while preserving the structure of the dataset. After assessing the different recipes in the modelling stage it can be concluded that recipe 1 with just PCA is the most effective approach.
+*****
+
+## 3. Modelling
+
+:::{#prompt .message style="color: blue;"}
+**Note**: It is expected that this section should result in no more than 400-ish words (possibly less; not counting the code blocks).
+
+Add here your modelling steps. Your solution should include both your code (which markers must be able to run independently) and your rationale. This section must include:
+
+- The fitting of a preliminary model on your preprocessed training data (to estimate some baseline performance level and to make sure your data is ready for modelling). Make this a simple model - logistic regression, decision trees or kNN are good options (but other may be used instead, if you prefer).
+
+- The building of a predictive pipeline encapsulating all the learned/learnable aspects of your solution. This should result in a pipeline-type object that uses your raw training data (post EDA and test set splitting, but prior to any preprocessing), fits all your preprocessing transformations (incl. dimensionality reduction) and the predictive model using that data, and can then be used to ingest your test data (or any new data in the same format) and generate predictions for each entry. 
+
+Please refer to the CW specs for other requirements of this step (including, e.g., the addition of a dimensionality reduction step into your pipeline).
+
+You can use as many code blocks as needed, but don't overdo it (remember - everything needs to have a proper rationale). If you compare different models, make sure to make it clear, and to indicate at the end which pipeline option is your final selected one.
+:::
+### 3.1 Decision‑tree baseline pipelines
+
+Defining a simple decision tree classifier and embedded into three different workflows, one using PCA, one with PCA and upsampling and one without PCA or upsampling. 
+These act as a baseline pipelines to see if the data is ready for modelling and comparing different recipes on the same model.
+```{r}
+dt.model <- decision_tree() %>%
+  set_mode("classification")%>%
+  set_engine("rpart")
+
+
+wf_pca <- workflow() %>% 
+  add_recipe(recipe_pca) %>% 
+  add_model(dt.model)
+wf_pca_up<- workflow() %>%
+  add_recipe(recipe_pca_upsample)%>%
+  add_model(dt.model)
+wf_no_pca<- workflow() %>% 
+  add_recipe(recipe_no_pca)%>% 
+  add_model(dt.model)
+
+wf_pca
+wf_pca_up
+wf_no_pca
+
+```
+### 3.2 Grouped CV and recipe comparison
+
+This block contains a grouped 3-fold cross-validation by "Info_group", fits each workflow and compares F1 scores across the three recipes to decide which preprocessing strategy works best.
+```{r}
+folds <- group_vfold_cv(train_data, v = 3, group = Info_group)
+fit_pca <- wf_pca %>%
+  fit_resamples(
+    resamples= folds,
+    metrics= metric_set(f_meas, roc_auc),
+    control= control_resamples(save_pred = TRUE)
+  )
+
+fit_pca_up<- wf_pca_up %>%
+  fit_resamples(
+    resamples= folds,
+    metrics= metric_set(f_meas, roc_auc),
+    control= control_resamples(save_pred = TRUE)
+  )
+
+fit_no_pca <- wf_no_pca %>%
+  fit_resamples(
+    resamples= folds,
+    metrics = metric_set(f_meas, roc_auc),
+    control = control_resamples(save_pred = TRUE)
+   )
+
+
+preproc_results <- bind_rows(
+  fit_pca %>% collect_metrics() %>% 
+    filter(.metric == "f_meas") %>% 
+    mutate(recipe = "PCA"),
+  fit_pca_up%>% 
+    collect_metrics() %>% 
+    filter(.metric == "f_meas") %>% 
+    mutate(recipe = "PCA + upsample"),
+  fit_no_pca  %>% 
+    collect_metrics() %>% 
+    filter(.metric == "f_meas") %>% 
+    mutate(recipe = "No PCA")
+)
+
+preproc_results
+```
+###3.3 ROC curve for the best recipe
+Plotting ROC curve for PCA based decision-tree workflow.It shows that baseline pipeline can separate the classes well, which means the setup is working as expected.
+```{r}
+fit_pca %>%
+  collect_predictions() %>%
+  roc_curve(Class, .pred_NoResponse) %>%
+  autoplot()
+
+```
+### 3.4 Random forest pipeline
+Using random forest model with fixed 'mtry' ,'min_n', and 'trees', uses clean weights to deal with the partial imbalance in class variable. PCA recipe is used to form an optimal pipeline. Using random forest as the recipe with only PCA is the best approach and the class imbalance can be mitigated using class weighting.IT can handle correlated features with noise and outliers and capture complex interactions without much tuning.
+```{r}
+# Random Forest + PCA 
+
+rf_model <- rand_forest(
+  mtry= 30,      
+  min_n = 10,     
+  trees= 500   
+) %>%
+  set_engine(
+    "ranger",
+    class.weights = c("NoResponse" = 1, "Response" = 1.4) 
+  ) %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_recipe(recipe_pca) %>%
+  add_model(rf_model)
+rf_wf
+
+```
+###3.5 Random forest CV performance
+Random forest pipeline is evaluated with grouped cross-validation and F1 and ROC as the metrics to assess performance with respect to the baseline decision tree.
+
+```{r}
+rf_fit <- rf_wf %>%
+  fit_resamples(
+    resamples = folds,
+    metrics = metric_set(f_meas, roc_auc, ppv,npv, accuracy, bal_accuracy),
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(rf_fit)
+
+
+```
+### 3.6 Random forest ROC curve
+This block visualises ROC curve to random-forest pipeline to check the ability to separate NoRespone from Response.
+```{r}
+rf_fit %>%
+  collect_predictions() %>%
+  roc_curve(Class, .pred_NoResponse) %>%
+  autoplot()
+
+```
+### 3.7 XGBoost pipeline
+XGBoost model with hyperparameters trees, learn rate ,tree depth and min with PCA recipe is used. Workflow is similar to random forest and SVM under the same preprocessing for comparison.Using XGBoost because it can exploit subtle patterns in features which can improve F1 compared to random forest.
+```{r}
+xgb_model <- boost_tree(
+  trees = 1000, 
+  learn_rate = 0.05,   
+  tree_depth = 4,   
+  min_n = 15    
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+xgb_wf <- workflow() %>%
+  add_recipe(recipe_pca) %>%   
+  add_model(xgb_model)
+xgb_wf
+
+```
+### 3.8 XGBoost CV performance
+Evaluating the XGBoost pipeline using grouped cross-validation and same metric as random forest to compare overall performance.
+```{r}
+xgb_fit <- xgb_wf %>%
+  fit_resamples(
+    resamples = folds,
+    metrics = metric_set(f_meas, roc_auc, ppv,npv, accuracy, bal_accuracy),
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(xgb_fit)
+
+```
+### 3.9 XGBoost ROC curve
+This code plots ROC curve for XGBOost pipeline to determine its ability to separate responders from non‑responders.
+
+```{r}
+xgb_fit %>%
+  collect_predictions() %>%
+  roc_curve(Class, .pred_NoResponse) %>%
+  autoplot()
+```
+### 3.10 SVM pipeline
+RBF‑kernel SVM with cost and kernel width (rbf_sigma) is defined , includes class weights to manage imbalance with PCA recipe. RBF-kernel SVMs are powerful margin-based classifier.Unlike tree-based methods , it can handle more fluid, non-linear patterns. Since only PCA is the best recipe, SVM supports class weights to solve class imbalance issue.
+```{r}
+svm_model<- svm_rbf(
+  cost =1,     
+  rbf_sigma = 0.1     
+) %>%
+  set_engine(
+    "kernlab",
+    class_weights = c("NoResponse" = 1, "Response" = 1.4) 
+  ) %>%
+  set_mode("classification")
+
+svm_wf <- workflow() %>%
+  add_recipe(recipe_pca) %>%   
+  add_model(svm_model)
+
+svm_wf
+```
+### 3.11 SVM CV performance
+This block runs grouped cross‑validation for the SVM pipeline with the same metrics as the decision tree, random forest, and XGBoost models for direct comparison.
+```{r}
+svm_fit <- svm_wf %>%
+  fit_resamples(
+    resamples = folds,
+    metrics = metric_set(f_meas, roc_auc, ppv,npv, accuracy, bal_accuracy),
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(svm_fit)
+```
+
+### 3.12 SVM ROC curve
+ ROC curve for the SVM pipeline to assess its ranking performance against the other models.
+```{r}
+svm_fit %>%
+  collect_predictions() %>%
+  roc_curve(Class, .pred_NoResponse) %>%
+  autoplot()
+
+```
+### 3.13 Model comparison table
+The code collects F1 scores from all the models (decision tree, random forest, XGBoost, SVM) into a single table so the best algorithm for this data can be identified clearly.
+```{r}
+dt_results  <- fit_pca %>% 
+  collect_metrics() %>% 
+  filter(.metric == "f_meas") %>% 
+  mutate(model = "Decision Tree")
+
+rf_results  <- rf_fit %>% 
+  collect_metrics() %>% 
+  filter(.metric == "f_meas") %>% 
+  mutate(model = "Random Forest")
+
+xgb_results <- xgb_fit %>% 
+  collect_metrics() %>% 
+  filter(.metric == "f_meas") %>% 
+  mutate(model = "XGBoost")
+
+svm_results <- svm_fit %>% 
+  collect_metrics() %>% 
+  filter(.metric == "f_meas") %>% 
+  mutate(model = "SVM")
+
+all_results <- bind_rows(dt_results, rf_results, xgb_results, svm_results)
+
+print(all_results)
+
+
+
+```
+### 3.14 Tuning random forest
+Defining a random forest with tunable mtry and min_n, keeping the PCA recipe, and building a workflow that will be used for hyperparameter tuning.
+```{r}
+rf_model2 <- rand_forest(
+  mtry= tune(),
+  min_n= tune(),
+  trees = 500
+) %>%
+  set_mode("classification") %>%
+  set_engine(
+    "ranger",
+    class.weights = c("NoResponse" = 1, "Response" = 1.4)
+  )
+
+wf_rf2 <- workflow() %>%
+  add_recipe(recipe_pca) %>%
+  add_model(rf_model2)
+
+wf_rf2
+
+```
+### 3.15 Grid search and tuning
+Creating a regular grid over mtry and min_n, running cross validation to tune random forest and listing best configurations ranked by f1 and selecting the best combination of mtry and min_n while also tracking ROC AUC.Using paralled processing for faster computation.
+```{r}
+cl <- makeCluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+
+ctrl <- control_grid(
+  verbose   = FALSE,
+  allow_par = TRUE            
+)
+
+rf_grid <- grid_regular(
+  mtry(range = c(10, 30)),
+  min_n(range = c(5, 15)),
+  levels     = 3
+)
+
+tune_folds <- group_vfold_cv(train_data, v= 3, group = Info_group)
+
+rf_tuned <- wf_rf2 %>%
+  tune_grid(
+    resamples = tune_folds,
+    grid  = rf_grid,
+    metrics = metric_set(f_meas, roc_auc),
+    control = ctrl
+  )
+
+stopCluster(cl)
+
+rf_tuned %>%
+  show_best(metric = "f_meas", n = 10)
+
+best_rf <- rf_tuned %>%
+  select_best(metric = "f_meas")
+
+best_rf
+```
+### 3.16 Final RF workflow and test datset evaluation
+Finalising the workflow with the best hyperparameters and using last_fit on the original grouped split to obtain an honest F1 and ROC AUC estimate on the held‑out test data, defining the final pipeline for later assessment and deployment.
+
+```{r}
+
+final_rf_wf <- wf_rf2 %>%
+  finalize_workflow(best_rf)
+
+final_rf_wf
+
+rf_final_fit <- final_rf_wf %>%
+  last_fit(
+    split2,
+    metrics = metric_set(f_meas, roc_auc)
+  )
+
+final_metrics <- rf_final_fit %>%
+collect_metrics()
+final_metrics
+
+final_f1 <- final_metrics %>%
+  filter(.metric == "f_meas") %>%
+  pull(.estimate)
+final_f1
+```
+
+In this section, decision tree was used first as a baseline model with three pipelines (PCA only, PCA plus upsampling and no PCA or upsampling) because tree are fast and easy to interpret. All pipelines start from the split data and applied KNN, imputation, winsorising, standardisation and PCA before fitting the tree and the performance is estimated with 3 fold group cross validation to ensure data and preprocessing is suitable for modelling. The baseline comparison shows that PCA only recipe has the highest F1 while keeping the pipeline simpler than the unsampling alternative.so this recipe is chosen for further modelling.
+
+Three more powerful models were explored.Random forest was chosen because it generally works well on high dimensional tabular data and can handle complex interactions.IT also supports class weights to resolve the class imbalance. XGBoost is included as a widely used gradient boosting algorithm for tabular features with strong predictive performance and it picks up on the subtle patterns in the features better than random forest .Finally RBF-kernel SVM was used because kernel function allows model to capture non-linear relationships in the data ensuring broader exploration of modelling stratergies.This also supports class weights. All the models were assessed under the same grouped cross validation with F1 as its primary metric along with ROC-AUC, PPV, NPV, accuracy and balanced accuracy.
+
+Among these, the random forest pipeline provided the best overall balance of F1 and was chosen as the main candidate for tuning. To optimize random forest two key hyperparameters (mtry and min_n) were tuned within workflow using regular grid and grouped cross-validation on training data again F1 as the primary metric.The best‑performing configuration was identified as mtry = 10 and min_n = 15 (config: pre0_mod3_post0).This tuned configuration was used to finalize the workflow.The final workflow was then refit on the full training data and evaluated on the held‑out test set with F1 of 0.7129151.
+
+These test results confirmed that the tuned random forest with PCA pipeline is the selected solution for predicting epitope response on new data.
+*****
+
+## 4. Model assessment
+
+:::{#prompt .message style="color: blue;"}
+**Note**: It is expected that this section should result in no more than 100-ish words (possibly less; not counting the code blocks).
+
+This is a short section in which you must estimate the generalisation performance of your model on the test set that you isolated at the start of your Data preprocessing step. It is also a chance for you to ensure that your pipeline object can take in new data and return the required predictions.
+
+Use your pipeline to generate predictions for your test set, and calculate the observed performance using the $F_1$-score as your main performance indicator. You can also additionally report other performance metrics if you think it's relevant.
+
+You can use as many code blocks as needed, but it's likely that this section can be completed with a single one. Make sure that your performance indicators are clearly echoed, so that a reader can easily check if after re-running your script. Add a short comment on the observed performance (is it good? Is it poor? Remember that you're not being assessed on the performance of your models, but on the soundness of your approach).
+
+:::
+In this section the final tuned random forest workflow is refitted on the full development data and evaluated on the previously isolated epitope holdout set, using F1 as the primary metric to estimate how well the pipeline generalises to unseen but distribution‑matched data. This step checks that the full preprocessing–modelling pipeline runs error‑free on new data with known labels and that the observed F1 is consistent with the cross‑validation results obtained during tuning.
+```{r}
+
+df_epitope <- read_rds("Epitope_holdout.rds")
+
+rf_final_model <- fit(final_rf_wf, data = df.dev)
+
+rf_epitope_preds <- predict(rf_final_model, new_data = df_epitope)
+
+rf_epitope_results <- df_epitope %>%
+  select(Class) %>%
+  mutate(PredictedClass = rf_epitope_preds$.pred_class)
+
+rf_epitope_metrics <- rf_epitope_results %>%
+  metric_set(accuracy, f_meas, ppv, npv, recall)(truth = Class, estimate = PredictedClass)
+
+
+rf_epitope_metrics
+
+```
+On the epitope holdout set, the final tuned random forest pipeline achieved an F1 score of 0.796, with accuracy of 0.737 and recall of 0.824, indicating that the model captures most true responders while maintaining reasonable overall correctness.
+
+*****
+
+## 5. Model deployment
+
+:::{#prompt .message style="color: blue;"}
+**Note**: This section is not expected to have much text in it, only the code and the results.
+
+Finally, in this section you'll generate predictions for some data for which you do not know the class labels. This simulates the real-life scenario in which your model needs to be deployed to generate new predictions for new, unknown data (after all, if the labels were known, we wouldn't need a model).
+
+Make sure that the data file __df_holdout.rds__ is placed in the same folder as this Task02.Rmd file. The new data will then be automatically loaded and set up for you, and stored into a dataframe variable called `df_holdout`, with the same columns as the original `df` that was loaded at the start of this task.
+
+- Use your fitted pipeline to generate predictions for this new data.
+
+- Build a new data frame called containing the following columns:
+    - `Info_PepID` (taken from df_holdout)
+    - `Info_pos`  (taken from df_holdout)
+    - `Predicted_class` (with the predictions produced by your pipeline)
+
+- Save your predictions dataframe to a file called __mypreds.rds__. You will be able to submit this file, and it will be used to give you some feedback on the actual performance of your pipeline on new data.
+:::
+In the deployment phase, the final fitted workflow is applied to the separate df_holdout dataset, which shares the same structure as the training data but has unknown class labels. This generates predicted classes for each peptide. The predictions are then combined with Info_PepID and Info_pos into a tibble and saved as mypreds.rds. This produces a file that mirrors how the model would be used in practice, ensuring reproducibility.
+```{r load_holdout, echo = FALSE}
+## DO NOT CHANGE ANYTHING IN THIS CODE BLOCK
+df_holdout <- readRDS("df_holdout.rds")
+
+model_for_deployment <- rf_final_fit %>% 
+  extract_workflow()
+
+holdout_preds <- predict(model_for_deployment, new_data = df_holdout)
+
+mypreds <- tibble(
+  Info_PepID= df_holdout$Info_PepID,
+  Info_pos= df_holdout$Info_pos,
+  Predictedclass = holdout_preds$.pred_class
+)
+
+saveRDS(mypreds, "mypreds.rds")
+```
+Calculating number of Response and NoResponse predicted on holdout dataset.
+```{r}
+mypreds %>%
+  count(Predictedclass) %>%
+  rename(Class = Predictedclass, Count = n)
+```
+*****
+*****
+
+### =========== End of Task II ===========
